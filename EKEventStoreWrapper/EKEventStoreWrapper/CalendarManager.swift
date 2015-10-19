@@ -66,12 +66,19 @@ public class CalendarManager{
         let newCalendar = EKCalendar(forEntityType: EKEntityType.Event, eventStore: eventStore)
         newCalendar.title = calendarName
         
-        // Filter the available sources and select the ones pretended. The instance MUST com from eventStore
-        let sourcesInEventStore = eventStore.sources
-        guard let source = (sourcesInEventStore.filter{ $0.sourceType == self.sourceType }.first) else {
-            return
+        /* Filter the available sources and select the ones pretended. The instance MUST com from eventStore
+         * If the default calendar source for new events is of the intended type, use it. Otherwise, try the first available
+         * that matches the source type */
+        if (eventStore.defaultCalendarForNewEvents.source.sourceType == self.sourceType) {
+            newCalendar.source = eventStore.defaultCalendarForNewEvents.source
+        } else {
+            let sourcesInEventStore = eventStore.sources
+            guard let source = (sourcesInEventStore.filter{ $0.sourceType == self.sourceType }.first) else {
+                completion?(wasSaved: false, error: nil)
+                return
+            }
+            newCalendar.source = source
         }
-        newCalendar.source = source
         
         do {
             try eventStore.saveCalendar(newCalendar, commit: commit)
@@ -251,4 +258,6 @@ extension CalendarManager {
         ]
         return NSError(domain: "CalendarFetchError", code: 668, userInfo: userInfo)
     }
+    
+    //private func generateDeniedAccess
 }
