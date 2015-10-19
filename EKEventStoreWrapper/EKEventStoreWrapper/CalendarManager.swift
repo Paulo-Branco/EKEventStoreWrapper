@@ -21,7 +21,7 @@ public class CalendarManager{
     
     public var calendarsWithSameIdentifier: [EKCalendar] {
         get {
-            return (eventStore.calendarsForEntityType(EKEntityTypeEvent) as! [EKCalendar]).filter({$0.title == self.calendarName})
+            return (eventStore.calendarsForEntityType(EKEntityType.Event)).filter({$0.title == self.calendarName})
         }
     }
     
@@ -31,7 +31,7 @@ public class CalendarManager{
         :param: `String`:            name of the calendar
         :param: `EKSourceType opt`:  sourceType, by default is EKSourceTypeCalDav (iCloud)
     */
-    public init(calendarName: String, sourceType: EKSourceType = EKSourceTypeCalDAV){
+    public init(calendarName: String, sourceType: EKSourceType = EKSourceType.CalDAV){
         self.calendarName = calendarName
         self.sourceType = sourceType
     }
@@ -42,13 +42,13 @@ public class CalendarManager{
         :param: `completion: (error: NSError?) -> ()` block of code
     */
     public func requestAuthorization(completion: (error: NSError?) -> ()){
-        switch EKEventStore.authorizationStatusForEntityType(EKEntityTypeEvent) {
+        switch EKEventStore.authorizationStatusForEntityType(EKEntityType.Event) {
         case .Authorized:
             completion(error: nil)
         case .Denied:
             completion(error: generateDeniedAccessToCalendarError())
         case .NotDetermined:
-            eventStore.requestAccessToEntityType(EKEntityTypeEvent, completion: {[weak self] (granted: Bool, error: NSError!) -> Void in
+            eventStore.requestAccessToEntityType(EKEntityType.Event, completion: {[weak self] (granted: Bool, error: NSError?) -> Void in
                 completion(error: granted ? nil : error)
                 })
         default:
@@ -63,17 +63,22 @@ public class CalendarManager{
         :param: `(wasSaved: Bool, error: NSError?) -> () optional`: completion in main_queue, default nil
     */
     public func addCalendar(commit: Bool = true, completion: ((wasSaved: Bool, error: NSError?) -> ())? = nil) {
-        let newCalendar = EKCalendar(forEntityType: EKEntityTypeEvent, eventStore: eventStore)
+        let newCalendar = EKCalendar(forEntityType: EKEntityType.Event, eventStore: eventStore)
         newCalendar.title = calendarName
         
         // Filter the available sources and select the ones pretended. The instance MUST com from eventStore
-        let sourcesInEventStore = eventStore.sources() as! [EKSource]
-        newCalendar.source = sourcesInEventStore.filter { $0.sourceType.value == self.sourceType.value }.first
+        let sourcesInEventStore = eventStore.sources
+        guard let source = (sourcesInEventStore.filter{ $0.sourceType == self.sourceType }.first) else {
+            return
+        }
+        newCalendar.source = source
         
-        var error: NSError? = nil
-        let calendarWasSaved = eventStore.saveCalendar(newCalendar, commit: commit, error: &error)
-        
-        completion?(wasSaved: calendarWasSaved, error: error)
+        do {
+            try eventStore.saveCalendar(newCalendar, commit: commit)
+            completion?(wasSaved: true, error: nil)
+        } catch let error as NSError {
+            completion?(wasSaved: false, error: error)
+        }
     }
     
     /**
@@ -100,10 +105,15 @@ public class CalendarManager{
     */
     public func removeEvent(eventId: String, commit: Bool = true, completion: ((wasRemoved: Bool, error: NSError?)-> ())? = nil){
         // Remove event from Calendar
-        var error: NSError?
-        let eventWasRemoved = eventStore.removeEvent(getEvent(eventId), span: EKSpanThisEvent, commit: commit, error: &error)
-        
-        completion?(wasRemoved: eventWasRemoved, error: error)
+        guard let event = getEvent(eventId) else {
+            return
+        }
+        do {
+            try eventStore.removeEvent(event, span: EKSpan.ThisEvent, commit: commit)
+            completion?(wasRemoved: true, error: nil)
+        } catch let error as NSError {
+            completion?(wasRemoved: false, error: error)
+        }
     }
     
     /**
@@ -113,20 +123,20 @@ public class CalendarManager{
         :param: `(wasRemoved: Bool, error: NSError?)-> () optional`: completion, default nil
     */
     public func removeCalendar(commit: Bool = true, completion: ((wasRemoved: Bool, error: NSError?)-> ())? = nil){
-        var error: NSError?
-        var wasRemoved = true
+        guard let calendar = calendar else {
+            return
+        }
         for c in calendarsWithSameIdentifier {
-            println("Removing \(c.title)")
-            wasRemoved = eventStore.removeCalendar(calendar, commit: commit, error: &error)
-            
-            if error != nil {
+            print("Removing \(c.title)")
+            do {
+                try eventStore.removeCalendar(calendar, commit: commit)
+                completion?(wasRemoved: true, error: nil)
+            } catch let error as NSError {
+                completion?(wasRemoved: false, error: error)
                 break
             }
-            
-            error = nil
         }
-        completion?(wasRemoved: wasRemoved, error: error)
-        
+        completion?(wasRemoved: true, error: nil)
     }
     
     /**
@@ -140,12 +150,7 @@ public class CalendarManager{
     public func getEvents(startDate: NSDate, endDate: NSDate) -> (events: [EKEvent], error: NSError?){
         if let c = calendar {
             let pred = eventStore.predicateForEventsWithStartDate(startDate, endDate: endDate, calendars: [c])
-            
-            if let result = eventStore.eventsMatchingPredicate(pred) as? [EKEvent]{
-                return (result, nil)
-            }else {
-                return ([], generateInvalidRangeError())
-            }
+            return (eventStore.eventsMatchingPredicate(pred), nil)
         }
         
         return ([], generateErrorCalendarNotFoundError())
@@ -168,7 +173,7 @@ public class CalendarManager{
         :param: `(error: NSError?) -> () optional`: completion block in main_queue, default nil
     */
     public func clearEvents(completion: ((error: NSError?) -> ())? = nil){
-        removeCalendar(commit: true, completion: {(wasRemoved: Bool, error: NSError?) in
+        removeCalendar(true, completion: {(wasRemoved: Bool, error: NSError?) in
             if wasRemoved {
                 self.addCalendar(completion: {(wasSaved: Bool, error: NSError?) in
                     completion?(error: wasSaved ? nil : error)
@@ -188,10 +193,12 @@ public class CalendarManager{
     */
     public func insertEvent(event: EKEvent, commit: Bool = true, completion: ((wasSaved: Bool, error: NSError?)-> ())? = nil) {
         // Save Event in Calendar
-        var error: NSError?
-        let eventWasSaved = eventStore.saveEvent(event, span: EKSpanThisEvent, commit: commit, error: &error)
-        
-        completion?(wasSaved: eventWasSaved, error: error)
+        do {
+            try eventStore.saveEvent(event, span: EKSpan.ThisEvent, commit: commit)
+            completion?(wasSaved: true, error: nil)
+        } catch let error as NSError {
+            completion?(wasSaved: false, error: error)
+        }
     }
     
     /**
@@ -200,10 +207,12 @@ public class CalendarManager{
         :returns: `NSError?`
     */
     public func commit() -> NSError?{
-        var error: NSError?
-        eventStore.commit(&error)
-        
-        return error
+        do {
+            try eventStore.commit()
+            return nil
+        } catch let error as NSError {
+            return error
+        }
     }
     
     /**
